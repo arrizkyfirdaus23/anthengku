@@ -3,12 +3,12 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Kasir Warung - Dashboard QRIS</title>
+  <title>Kasir Warung - Firebase Firestore</title>
   
   <!-- Tailwind CSS CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
   
-  <!-- Firebase App & Auth SDK v10 (ES Modules) -->
+  <!-- Firebase App, Auth & Firestore SDK v10 (ES Modules) -->
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
     import { 
@@ -17,8 +17,19 @@
       onAuthStateChanged, 
       signOut 
     } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
+    import { 
+      getFirestore, 
+      collection, 
+      addDoc, 
+      getDocs, 
+      deleteDoc, 
+      doc, 
+      query, 
+      orderBy, 
+      serverTimestamp 
+    } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
 
-    // Konfigurasi Firebase Anthengku (Tetap sesuai aslinya)
+    // Konfigurasi Firebase Anthengku (Asli milikmu)
     const firebaseConfig = {
       apiKey: "AIzaSyCk6FsjLCD-5a04R3Z28LFC8Z7GJAI6jgU",
       authDomain: "anthengku.firebaseapp.com",
@@ -28,12 +39,10 @@
       appId: "1:866501661876:web:9e0c3485f8edf08d78f3e1"
     };
 
-    // URL Web App Google Apps Script
-    const GAS_URL = "https://script.google.com/macros/s/AKfycby0TIX62JWOUQFUe1jrk8FbRkVvYDU_LUjpCnFVzVrHk2kOZjK599Jg3pRZJ-PmzFx8/exec";
-
-    // Inisialisasi Firebase
+    // Inisialisasi Firebase & Firestore
     const app = initializeApp(firebaseConfig);
     const auth = getAuth(app);
+    const db = getFirestore(app);
 
     let currentUser = null;
 
@@ -47,7 +56,7 @@
         loginSection.classList.add('hidden');
         appSection.classList.remove('hidden');
         document.getElementById('user-email').innerText = user.email;
-        loadDashboard(); // Ototmatis muat dashboard saat login
+        loadDashboard(); // Otomatis muat data saat login
       } else {
         currentUser = null;
         loginSection.classList.remove('hidden');
@@ -101,13 +110,12 @@
       }
     };
 
-    // Handle Form Transaksi QRIS
+    // Handle Form Transaksi QRIS (Simpan ke Firestore)
     document.getElementById('qris-form').addEventListener('submit', async (e) => {
       e.preventDefault();
       
       const submitBtn = document.getElementById('submit-btn');
       const statusMsg = document.getElementById('status-msg');
-      
       statusMsg.innerText = '';
 
       const nominal = parseFloat(document.getElementById('nominal').value) || 0;
@@ -118,97 +126,106 @@
       }
 
       submitBtn.disabled = true;
-      submitBtn.innerText = 'Menyimpan Transaksi...';
+      submitBtn.innerText = 'Menyimpan ke Firebase...';
 
       const now = new Date();
       const jamWaktu = now.toTimeString().split(' ')[0];
 
-      const payload = {
-        jenisPencatatan: "QRIS_TRANSACTION",
-        tanggal: document.getElementById('tanggal').value,
-        waktu: jamWaktu,
-        userEmail: currentUser.email,
-        nominal: nominal,
-        keterangan: document.getElementById('keterangan').value || '-'
-      };
-
       try {
-        await fetch(GAS_URL, {
-          method: 'POST',
-          mode: 'no-cors',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
+        // Kirim data langsung ke koleksi Firestore "transactions"
+        await addDoc(collection(db, "transactions"), {
+          tanggal: document.getElementById('tanggal').value,
+          waktu: jamWaktu,
+          userEmail: currentUser.email,
+          nominal: nominal,
+          keterangan: document.getElementById('keterangan').value || '-',
+          createdAt: serverTimestamp()
         });
 
         statusMsg.className = "text-emerald-600 font-bold text-center mt-3 p-2 bg-emerald-50 rounded-lg border border-emerald-200";
-        statusMsg.innerText = "✅ Transaksi QRIS Berhasil Dicatat!";
+        statusMsg.innerText = "✅ Transaksi QRIS Berhasil Disimpan!";
         
         document.getElementById('nominal').value = '';
         document.getElementById('keterangan').value = '';
         document.getElementById('nominal').focus();
       } catch (err) {
+        console.error(err);
         statusMsg.className = "text-red-600 font-bold text-center mt-3 p-2 bg-red-50 rounded-lg border border-red-200";
-        statusMsg.innerText = "❌ Gagal menyimpan transaksi. Periksa koneksi internet.";
+        statusMsg.innerText = "❌ Gagal menyimpan transaksi. Periksa koneksi/izin Firestore.";
       } finally {
         submitBtn.disabled = false;
         submitBtn.innerText = 'Catat Transaksi QRIS';
       }
     });
 
-    // Fungsi Load Dashboard dari GAS (GET Request)
+    // Fungsi Ambil Data & Tampilkan Dashboard dari Firestore
     window.loadDashboard = async () => {
       const container = document.getElementById('transaction-list');
       const totalHariIniEl = document.getElementById('total-qris-hari-ini');
       const jumlahTxEl = document.getElementById('jumlah-tx-hari-ini');
       
-      container.innerHTML = '<tr><td colspan="3" class="text-center py-4 text-slate-400 text-xs">Memuat data...</td></tr>';
+      container.innerHTML = '<tr><td colspan="4" class="text-center py-4 text-slate-400 text-xs">Memuat data...</td></tr>';
 
       try {
-        const response = await fetch(`${GAS_URL}?action=getTransactions`);
-        const result = await response.json();
+        const q = query(collection(db, "transactions"), orderBy("createdAt", "desc"));
+        const querySnapshot = await getDocs(q);
+        
+        let totalHariIni = 0;
+        let countHariIni = 0;
+        const todayStr = new Date().toISOString().split('T')[0];
+        let htmlRows = '';
 
-        if (result && result.data) {
-          const data = result.data; // Asumsi GAS mengembalikan array objek transaksi
-          
-          let totalHariIni = 0;
-          let countHariIni = 0;
-          const todayStr = new Date().toISOString().split('T')[0];
+        querySnapshot.forEach((docSnap) => {
+          const tx = docSnap.data();
+          const docId = docSnap.id;
 
-          let htmlRows = '';
-
-          // Urutkan dari yang terbaru jika ada timestamp/waktu
-          data.reverse().forEach(tx => {
-            if (tx.tanggal === todayStr) {
-              totalHariIni += parseFloat(tx.nominal) || 0;
-              countHariIni++;
-            }
-
-            htmlRows += `
-              <tr class="border-b border-slate-100 hover:bg-slate-50">
-                <td class="py-2.5 px-2 text-slate-700">
-                  <div class="font-bold">${tx.waktu || '-'}</div>
-                  <div class="text-[10px] text-slate-400">${tx.tanggal}</div>
-                </td>
-                <td class="py-2.5 px-2 font-bold text-blue-600">Rp ${Number(tx.nominal).toLocaleString('id-ID')}</td>
-                <td class="py-2.5 px-2 text-slate-600 truncate max-w-[120px]">${tx.keterangan || '-'}</td>
-              </tr>
-            `;
-          });
-
-          totalHariIniEl.innerText = `Rp ${Number(totalHariIni).toLocaleString('id-ID')}`;
-          jumlahTxEl.innerText = `${countHariIni} Transaksi`;
-
-          if (htmlRows === '') {
-            container.innerHTML = '<tr><td colspan="3" class="text-center py-4 text-slate-400 text-xs">Belum ada transaksi hari ini.</td></tr>';
-          } else {
-            container.innerHTML = htmlRows;
+          if (tx.tanggal === todayStr) {
+            totalHariIni += parseFloat(tx.nominal) || 0;
+            countHariIni++;
           }
+
+          htmlRows += `
+            <tr class="border-b border-slate-100 hover:bg-slate-50">
+              <td class="py-2.5 px-2 text-slate-700">
+                <div class="font-bold">${tx.waktu || '-'}</div>
+                <div class="text-[10px] text-slate-400">${tx.tanggal}</div>
+              </td>
+              <td class="py-2.5 px-2 font-bold text-blue-600">Rp ${Number(tx.nominal).toLocaleString('id-ID')}</td>
+              <td class="py-2.5 px-2 text-slate-600 truncate max-w-[90px]">${tx.keterangan || '-'}</td>
+              <td class="py-2.5 px-2 text-center">
+                <button onclick="deleteTransaction('${docId}')" 
+                        class="bg-red-50 hover:bg-red-100 text-red-600 px-2 py-1 rounded-md text-xs transition font-semibold" title="Hapus">
+                  🗑️
+                </button>
+              </td>
+            </tr>
+          `;
+        });
+
+        totalHariIniEl.innerText = `Rp ${Number(totalHariIni).toLocaleString('id-ID')}`;
+        jumlahTxEl.innerText = `${countHariIni} Transaksi`;
+
+        if (htmlRows === '') {
+          container.innerHTML = '<tr><td colspan="4" class="text-center py-4 text-slate-400 text-xs">Belum ada transaksi tersimpan.</td></tr>';
         } else {
-          container.innerHTML = '<tr><td colspan="3" class="text-center py-4 text-slate-400 text-xs">Format data kosong / belum didukung di GAS.</td></tr>';
+          container.innerHTML = htmlRows;
         }
       } catch (err) {
-        // Fallback simulasi jika GAS belum disetting fungsi doGet() JSON
-        container.innerHTML = '<tr><td colspan="3" class="text-center py-4 text-slate-400 text-xs">Gagal memuat data dari Spreadsheet.<br><span class="text-[10px] text-slate-400">Pastikan GAS mendukung endpoint GET.</span></td></tr>';
+        console.error(err);
+        container.innerHTML = '<tr><td colspan="4" class="text-center py-4 text-red-400 text-xs">Gagal memuat data dari Firestore.</td></tr>';
+      }
+    };
+
+    // Fungsi Hapus Transaksi
+    window.deleteTransaction = async (docId) => {
+      if (confirm("Yakin ingin menghapus transaksi ini?")) {
+        try {
+          await deleteDoc(doc(db, "transactions", docId));
+          loadDashboard(); // Refresh data dashboard setelah dihapus
+        } catch (err) {
+          alert("Gagal menghapus transaksi.");
+          console.error(err);
+        }
       }
     };
 
@@ -270,7 +287,7 @@
         ➕ Input QRIS
       </button>
       <button id="tab-dashboard-btn" onclick="switchTab('dashboard')" class="flex-1 py-2 text-xs font-bold rounded-lg text-slate-600 hover:bg-slate-100 transition">
-        📊 Dashboard
+        📊 Dashboard & Riwayat
       </button>
     </div>
 
@@ -302,7 +319,7 @@
       <div id="status-msg"></div>
     </div>
 
-    <!-- VIEW 2: DASHBOARD & REKAP -->
+    <!-- VIEW 2: DASHBOARD & RIWAYAT -->
     <div id="dashboard-view" class="hidden space-y-3">
       <!-- Ringkasan Kartu -->
       <div class="grid grid-cols-2 gap-2">
@@ -318,7 +335,7 @@
 
       <!-- Tabel Riwayat -->
       <div class="flex justify-between items-center pt-2">
-        <h4 class="text-xs font-bold text-slate-700">Riwayat Transaksi Terbaru</h4>
+        <h4 class="text-xs font-bold text-slate-700">Riwayat Transaksi</h4>
         <button onclick="loadDashboard()" class="text-[10px] bg-slate-100 hover:bg-slate-200 text-slate-600 px-2.5 py-1 rounded-md font-semibold transition">
           🔄 Refresh
         </button>
@@ -326,11 +343,12 @@
 
       <div class="max-h-60 overflow-y-auto border border-slate-200 rounded-xl">
         <table class="w-full text-left text-xs">
-          <thead class="bg-slate-50 border-b border-slate-200 text-slate-500 uppercase text-[10px]">
+          <thead class="bg-slate-50 border-b border-slate-200 text-slate-500 uppercase text-[10px] sticky top-0">
             <tr>
               <th class="py-2 px-2">Waktu</th>
               <th class="py-2 px-2">Nominal</th>
               <th class="py-2 px-2">Keterangan</th>
+              <th class="py-2 px-2 text-center">Aksi</th>
             </tr>
           </thead>
           <tbody id="transaction-list">
@@ -343,5 +361,4 @@
   </div>
 
 </body>
-      </html>
-      
+</html>
